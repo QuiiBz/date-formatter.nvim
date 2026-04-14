@@ -17,7 +17,7 @@ local MONTH_NAMES = {
 
 local DEFAULT_OPTIONS = {
   auto = false,
-  events = { 'BufEnter', 'TextChanged', 'TextChangedI', 'InsertLeave' },
+  events = { 'BufEnter', 'BufWinEnter', 'TextChanged', 'TextChangedI', 'InsertLeave' },
   filetypes = nil,
   buftypes = nil,
 }
@@ -209,7 +209,7 @@ end
 local function build_replacement(timestamp, has_time, now)
   local absolute = format_absolute_time(timestamp, has_time)
   local relative = format_relative_time(timestamp, now)
-  return string.format('%s (%s)', absolute, relative)
+  return string.format('%s, %s', absolute, relative)
 end
 
 local function build_annotation_text(replacer, now, c1, c2, c3, c4, c5, c6)
@@ -274,6 +274,73 @@ local function find_matches_in_line(line, now)
   end)
 
   return matches
+end
+
+local function annotation_width(matches)
+  local width = 0
+  for _, match in ipairs(matches) do
+    width = width + vim.fn.strdisplaywidth(' (' .. match.text .. ')')
+  end
+
+  return width
+end
+
+local function resize_floating_windows(bufnr, now)
+  local wins = vim.fn.win_findbuf(bufnr)
+  if #wins == 0 then
+    return
+  end
+
+  local max_editor_width = math.max(1, vim.o.columns - 2)
+
+  for _, winid in ipairs(wins) do
+    if vim.api.nvim_win_is_valid(winid) then
+      local config = vim.api.nvim_win_get_config(winid)
+      if config.relative ~= '' then
+        local top = vim.fn.line('w0', winid) - 1
+        local bottom = vim.fn.line('w$', winid)
+
+        if top < 0 then
+          top = 0
+        end
+
+        if bottom < top + 1 then
+          bottom = top + 1
+        end
+
+        local lines = vim.api.nvim_buf_get_lines(bufnr, top, bottom, false)
+        local current_width = vim.api.nvim_win_get_width(winid)
+        local required_width = current_width
+        local has_overflowing_annotation = false
+
+        for _, line in ipairs(lines) do
+          local matches = find_matches_in_line(line, now)
+          if #matches > 0 then
+            local base_width = vim.fn.strdisplaywidth(line)
+            local annotated_width = base_width + annotation_width(matches)
+
+            if annotated_width > current_width then
+              has_overflowing_annotation = true
+            end
+
+            if annotated_width > required_width then
+              required_width = annotated_width
+            end
+          end
+        end
+
+        if has_overflowing_annotation then
+          if required_width > max_editor_width then
+            required_width = max_editor_width
+          end
+
+          if required_width > current_width then
+            pcall(vim.api.nvim_win_set_width, winid, required_width)
+          end
+        end
+      end
+    end
+  end
 end
 
 local function can_process_buffer(bufnr, opts)
@@ -360,6 +427,8 @@ function M.replace_dates_in_buffer(opts)
     end
   end
 
+  resize_floating_windows(bufnr, now)
+
   return {
     changed = replacements > 0,
     replacements = replacements,
@@ -379,11 +448,11 @@ local function create_command()
     return result
   end
 
-  vim.api.nvim_create_user_command('DateReplacer', function()
+  vim.api.nvim_create_user_command('DateFormatter', function()
     local bufnr = vim.api.nvim_get_current_buf()
 
     if not can_process_buffer(bufnr, { ignore_toggle = true }) then
-      vim.notify('DateReplacer: current buffer is not eligible for replacement', vim.log.levels.INFO)
+      vim.notify('DateFormatter: current buffer is not eligible for replacement', vim.log.levels.INFO)
       return
     end
 
@@ -392,23 +461,23 @@ local function create_command()
 
     if not next_state then
       clear_annotations(bufnr, 0, -1)
-      vim.notify('DateReplacer: disabled for current buffer', vim.log.levels.INFO)
+      vim.notify('DateFormatter: disabled for current buffer', vim.log.levels.INFO)
       return
     end
 
     local result = refresh_visible(bufnr)
     if result.replacements == 0 then
-      vim.notify('DateReplacer: enabled for current buffer (no date-like values found)', vim.log.levels.INFO)
+      vim.notify('DateFormatter: enabled for current buffer (no date-like values found)', vim.log.levels.INFO)
       return
     end
 
     local suffix = result.replacements == 1 and '' or 's'
     vim.notify(
-      string.format('DateReplacer: enabled for current buffer, showing %d date%s', result.replacements, suffix),
+      string.format('DateFormatter: enabled for current buffer, showing %d date%s', result.replacements, suffix),
       vim.log.levels.INFO
     )
   end, {
-    desc = 'Toggle DateReplacer for current buffer',
+    desc = 'Toggle DateFormatter for current buffer',
   })
 
   state.command_created = true
@@ -535,43 +604,62 @@ end
 local function configure_autocmd()
   local group = vim.api.nvim_create_augroup('date-formatter', { clear = true })
 
+  local function run_safe_refresh(bufnr, refresh_fn)
+    if state.processing[bufnr] then
+      return
+    end
+
+    state.processing[bufnr] = true
+    local ok, err = pcall(refresh_fn)
+    state.processing[bufnr] = nil
+
+    if not ok then
+      vim.schedule(function()
+        vim.notify('DateFormatter: ' .. tostring(err), vim.log.levels.WARN)
+      end)
+    end
+  end
+
   vim.api.nvim_create_autocmd(state.options.events, {
     group = group,
     callback = function(event)
       local bufnr = event.buf
 
-      if state.processing[bufnr] then
-        return
-      end
-
-      state.processing[bufnr] = true
-      local ok, err
-
       if event.event == 'TextChanged' or event.event == 'TextChangedI' then
         local start_line, end_line = resolve_refresh_range(bufnr, event.event)
-        ok, err = pcall(M.replace_dates_in_buffer, {
-          bufnr = bufnr,
-          start_line = start_line,
-          end_line = end_line,
-        })
-      else
-        ok, err = pcall(M.refresh_visible_in_buffer, {
-          bufnr = bufnr,
-        })
-      end
-
-      state.processing[bufnr] = nil
-
-      if not ok then
-        vim.schedule(function()
-          vim.notify('DateReplacer: ' .. tostring(err), vim.log.levels.WARN)
+        run_safe_refresh(bufnr, function()
+          M.replace_dates_in_buffer({
+            bufnr = bufnr,
+            start_line = start_line,
+            end_line = end_line,
+          })
         end)
+      else
+        run_safe_refresh(bufnr, function()
+          M.refresh_visible_in_buffer({
+            bufnr = bufnr,
+          })
+        end)
+
+        if event.event == 'BufEnter' or event.event == 'BufWinEnter' then
+          vim.defer_fn(function()
+            if not vim.api.nvim_buf_is_valid(bufnr) then
+              return
+            end
+
+            run_safe_refresh(bufnr, function()
+              M.refresh_visible_in_buffer({
+                bufnr = bufnr,
+              })
+            end)
+          end, 80)
+        end
       end
     end,
   })
 end
 
---- Setup DateReplacer.
+--- Setup DateFormatter.
 --- @param opts {auto?:boolean,events?:string[],filetypes?:string[]|nil,buftypes?:string[]|nil}|nil
 function M.setup(opts)
   state.options = vim.tbl_deep_extend('force', vim.deepcopy(DEFAULT_OPTIONS), opts or {})

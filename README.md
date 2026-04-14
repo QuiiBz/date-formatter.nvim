@@ -10,13 +10,13 @@ Example:
 
 ```text
 Input:  4a5f649b Tom Lienard (2024-02-28 18:32):
-View:   4a5f649b Tom Lienard (2024-02-28 18:32) (Feb 28 2024, 18:32 (2 years ago)):
+View:   4a5f649b Tom Lienard (2024-02-28 18:32) (Feb 28 2024, 18:32, 2 years ago):
 ```
 
 ## Features
 
 - Non-destructive: your buffer content is not rewritten.
-- `:DateReplacer` toggles annotations on/off for the current buffer.
+- `:DateFormatter` toggles annotations on/off for the current buffer.
 - Incremental refresh: on text changes, only the edited line is recomputed.
 - Full refresh is viewport-only: only visible lines are recomputed.
 - Detects common date formats:
@@ -41,14 +41,14 @@ View:   4a5f649b Tom Lienard (2024-02-28 18:32) (Feb 28 2024, 18:32 (2 years ago
 
 ## Usage
 
-- `:DateReplacer` to toggle date annotations for the current buffer.
+- `:DateFormatter` to toggle date annotations for the current buffer.
 
 ## Configuration
 
 ```lua
 require('date-formatter').setup({
   auto = false,
-  events = { 'BufEnter', 'TextChanged', 'TextChangedI', 'InsertLeave' },
+  events = { 'BufEnter', 'BufWinEnter', 'TextChanged', 'TextChangedI', 'InsertLeave' },
   filetypes = nil,
   buftypes = nil,
 })
